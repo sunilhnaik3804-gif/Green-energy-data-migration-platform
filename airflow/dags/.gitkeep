@@ -1,0 +1,21 @@
+             APACHE AIRFLOW
+              Orchestration
+                    |
+                    ▼
+          Oracle ERP + MySQL
+             Source Systems
+                    |
+                    ▼
+             Informix DB
+             Staging Layer
+                    |
+                    ▼
+              Python ETL
+             Transformations
+                    |
+                    ▼
+              PostgreSQL
+             Data Warehouse
+                    |
+                    ▼
+                Power BI
