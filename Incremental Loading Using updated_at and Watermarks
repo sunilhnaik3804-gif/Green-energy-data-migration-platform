@@ -1,0 +1,163 @@
+```sql
+CREATE TABLE IF NOT EXISTS public.etl_watermarks (
+    source_system VARCHAR(20) PRIMARY KEY,
+    last_updated_timestamp TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Initialize both source watermarks.
+-- NULL means the first run has no saved watermark.
+INSERT INTO public.etl_watermarks (
+    source_system,
+    last_updated_timestamp
+)
+VALUES
+    ('ORACLE', NULL),
+    ('MYSQL', NULL)
+ON CONFLICT (source_system) DO NOTHING;
+```
+
+
+```python
+import logging
+
+import oracledb
+import pymysql
+
+from config.config import (
+    get_oracle_config,
+    get_mysql_config,
+)
+from etl.load import get_postgres_connection
+
+logging.basicConfig(level=logging.INFO)
+
+
+def get_watermark(source_system):
+    """Read the last successfully saved watermark."""
+
+    connection = get_postgres_connection()
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT last_updated_timestamp
+                FROM public.etl_watermarks
+                WHERE source_system = %s
+                """,
+                (source_system,),
+            )
+
+            result = cursor.fetchone()
+
+            if result is None:
+                raise ValueError(
+                    f"Watermark not initialized for {source_system}"
+                )
+
+            return result[0]
+
+    finally:
+        connection.close()
+
+
+def extract_oracle_incremental(batch_size=1000):
+    """Extract Oracle records after the saved watermark."""
+
+    watermark = get_watermark("ORACLE")
+    connection = None
+
+    query = """
+        SELECT
+            mf_id, plant_id, plant_name, energy_type,
+            meter_id, meter_factor, generation_mwh,
+            effective_date, location, status,
+            created_at, updated_at
+        FROM oracle_meter_factor
+        WHERE updated_at > :watermark
+        ORDER BY updated_at, mf_id
+    """
+
+    try:
+        connection = oracledb.connect(**get_oracle_config())
+
+        with connection.cursor() as cursor:
+            cursor.arraysize = batch_size
+            cursor.execute(query, watermark=watermark)
+
+            columns = [
+                column[0].lower()
+                for column in cursor.description
+            ]
+
+            while True:
+                rows = cursor.fetchmany(batch_size)
+
+                if not rows:
+                    break
+
+                yield [
+                    dict(zip(columns, row))
+                    for row in rows
+                ]
+
+    except Exception:
+        logging.exception("Oracle incremental extraction failed")
+        raise
+
+    finally:
+        if connection:
+            connection.close()
+
+
+def extract_mysql_incremental(batch_size=1000):
+    """Extract MySQL records after the saved watermark."""
+
+    watermark = get_watermark("MYSQL")
+    connection = None
+
+    query = """
+        SELECT
+            mf_id, plant_id, plant_name, energy_type,
+            meter_id, meter_factor, generation_mwh,
+            effective_date, location, status,
+            created_at, updated_at
+        FROM mysql_meter_factor
+        WHERE updated_at > %s
+        ORDER BY updated_at, mf_id
+    """
+
+    try:
+        connection = pymysql.connect(
+            **get_mysql_config(),
+            cursorclass=pymysql.cursors.SSCursor,
+        )
+
+        with connection.cursor() as cursor:
+            cursor.execute(query, (watermark,))
+
+            columns = [
+                column[0].lower()
+                for column in cursor.description
+            ]
+
+            while True:
+                rows = cursor.fetchmany(batch_size)
+
+                if not rows:
+                    break
+
+                yield [
+                    dict(zip(columns, row))
+                    for row in rows
+                ]
+
+    except Exception:
+        logging.exception("MySQL incremental extraction failed")
+        raise
+
+    finally:
+        if connection:
+            connection.close()
+```
